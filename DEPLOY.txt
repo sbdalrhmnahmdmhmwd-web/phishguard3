@@ -1,0 +1,102 @@
+PHISHGUARD - HOW TO DEPLOY ON ORACLE CLOUD (UBUNTU)
+
+What we are building: Nginx serves the website (the "website" folder) and passes any /api request to the tool (Flask + Gunicorn, the "tool" folder). One server runs both.
+
+PART 1 - CREATE THE VM ON ORACLE
+1. Sign up at cloud.oracle.com (Always Free tier). It asks for a card for verification, but the free resources stay free.
+2. Menu > Compute > Instances > Create instance.
+3. Image: Canonical Ubuntu 22.04. Shape: VM.Standard.E2.1.Micro (Always Free). If Oracle says "out of capacity", try VM.Standard.A1.Flex with 1 OCPU and 6 GB, or try again later.
+4. Under "Add SSH keys" choose "Generate a key pair" and download BOTH keys. Keep the private key (.key file) safe. Without it you can't log in.
+5. Make sure "Assign a public IPv4 address" is on. Click Create. Wait until it says RUNNING and copy the Public IP.
+   (Screenshot for the presentation: instance details page)
+
+PART 2 - OPEN PORTS 80 AND 443 (the step everybody forgets)
+Oracle blocks them in two places, so do both.
+A. In the Oracle console: click your instance > the Subnet link > Security Lists > Default Security List > Add Ingress Rules.
+   Source CIDR 0.0.0.0/0, IP Protocol TCP, Destination Port 80. Add another one for 443.
+   (Screenshot: ingress rules)
+B. Inside the VM (we do this in Part 3, step 3).
+
+PART 3 - CONNECT AND SET UP THE SERVER
+On your laptop (Windows PowerShell, Mac or Linux terminal):
+1. chmod 400 path/to/ssh-key.key        (skip on Windows)
+   ssh -i path/to/ssh-key.key ubuntu@YOUR_PUBLIC_IP
+   (Screenshot: terminal logged in)
+2. sudo apt update && sudo apt install -y python3-venv python3-pip nginx
+3. Open the firewall inside Ubuntu:
+   sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+   sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+   sudo apt install -y iptables-persistent     (say Yes to save the rules)
+   sudo netfilter-persistent save
+
+PART 4 - UPLOAD THE PROJECT
+On your laptop, in the folder that contains the "phishguard" folder:
+   scp -i path/to/ssh-key.key -r phishguard ubuntu@YOUR_PUBLIC_IP:~/
+Then on the server:
+   cd ~/phishguard/tool
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   gunicorn -b 127.0.0.1:8000 api:app      (quick test, press Ctrl+C to stop)
+   curl http://127.0.0.1:8000/api/health   (should print {"status":"ok"}, in a second terminal)
+
+PART 5 - KEEP THE TOOL RUNNING (systemd)
+   sudo nano /etc/systemd/system/phishguard.service
+Paste this:
+   [Unit]
+   Description=PhishGuard API
+   After=network.target
+   [Service]
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/phishguard/tool
+   ExecStart=/home/ubuntu/phishguard/tool/venv/bin/gunicorn -w 2 -b 127.0.0.1:8000 api:app
+   Restart=always
+   [Install]
+   WantedBy=multi-user.target
+Then:
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now phishguard
+   sudo systemctl status phishguard        (should say active (running))
+   (Screenshot: status running)
+
+PART 6 - NGINX (website + API)
+   sudo mkdir -p /var/www/phishguard
+   sudo cp ~/phishguard/website/index.html /var/www/phishguard/
+   sudo nano /etc/nginx/sites-available/phishguard
+Paste this:
+   server {
+       listen 80 default_server;
+       server_name _;
+       root /var/www/phishguard;
+       index index.html;
+       location /api/ {
+           proxy_pass http://127.0.0.1:8000;
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+       }
+   }
+Then:
+   sudo rm /etc/nginx/sites-enabled/default
+   sudo ln -s /etc/nginx/sites-available/phishguard /etc/nginx/sites-enabled/
+   sudo nginx -t
+   sudo systemctl restart nginx
+Open http://YOUR_PUBLIC_IP in your browser. Try the example links.
+   (Screenshots: the site loaded, a dangerous result, a safe result)
+
+PART 7 - OPTIONAL BUT LOOKS GOOD: DOMAIN + HTTPS
+1. Get a free domain (DuckDNS.org gives something like phishguard.duckdns.org) and point it to your public IP.
+2. Change "server_name _;" to your domain in the nginx file, then:
+   sudo apt install -y certbot python3-certbot-nginx
+   sudo certbot --nginx -d yourdomain
+3. The site now runs on https:// with a padlock.
+
+IF SOMETHING BREAKS
+- Site doesn't load at all: you missed one of the two firewall steps (Part 2A or 3 step 3). This is the cause 90% of the time.
+- 502 Bad Gateway: the tool isn't running. Check: sudo systemctl status phishguard and sudo journalctl -u phishguard -n 30
+- Changed the code? sudo systemctl restart phishguard (and re-copy index.html if you changed the website).
+
+IF A FRIEND BUILDS A DIFFERENT WEBSITE
+They only need the tool folder. The API is POST /api/analyze with JSON {"url": "..."} and it returns score, verdict, parts, findings. Their page just needs to call it.
+
+SCREENSHOTS CHECKLIST FOR THE PRESENTATION
+Instance created, ingress rules, SSH login, service running, nginx test OK, site in browser (safe + dangerous example), and the HTTPS padlock if you did Part 7.
